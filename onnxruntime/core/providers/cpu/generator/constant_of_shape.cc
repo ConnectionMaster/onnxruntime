@@ -7,15 +7,21 @@
 namespace onnxruntime {
 
 namespace op_kernel_type_control {
-ORT_SPECIFY_OP_KERNEL_ARG_SUPPORTED_TYPE_LIST_ALL_OPSETS(
+ORT_SPECIFY_OP_KERNEL_ARG_DEFAULT_TYPE_LIST_ALL_OPSETS(
     kCpuExecutionProvider, kOnnxDomain, ConstantOfShape, Output, 0,
     ConstantOfShapeDefaultOutputTypes);
-}
+
+// pytorch converter uses ConstantOfShape with int64 to create Pad input
+// https://github.com/pytorch/pytorch/blob/044b519a80459f6787f6723c1c091a18b153d184/torch/onnx/symbolic_opset11.py#L449
+ORT_SPECIFY_OP_KERNEL_ARG_REQUIRED_TYPES_ALL_OPSETS(
+    kCpuExecutionProvider, kOnnxDomain, ConstantOfShape, Output, 0,
+    int64_t);
+}  // namespace op_kernel_type_control
 
 namespace {
 
-using SupportedOutputTypes =
-    ORT_OP_KERNEL_ARG_SUPPORTED_TYPE_LIST_ALL_OPSETS(
+using OutputTypes =
+    ORT_OP_KERNEL_ARG_DEFAULT_TYPE_LIST_ALL_OPSETS(
         kCpuExecutionProvider, kOnnxDomain, ConstantOfShape, Output, 0);
 
 using EnabledOutputTypes =
@@ -70,7 +76,7 @@ ONNX_CPU_OPERATOR_KERNEL(
     KernelDefBuilder()
         .TypeConstraint("T1", DataTypeImpl::GetTensorType<int64_t>())
         .TypeConstraint("T2",
-                        BuildKernelDefConstraintsFromTypeList<SupportedOutputTypes>(),
+                        BuildKernelDefConstraintsFromTypeList<OutputTypes>(),
                         BuildKernelDefConstraintsFromTypeList<EnabledOutputTypes>()),
     ConstantOfShape);
 

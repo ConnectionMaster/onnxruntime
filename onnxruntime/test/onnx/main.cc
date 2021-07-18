@@ -36,7 +36,7 @@ void usage() {
       "\t-v: verbose\n"
       "\t-n [test_case_name]: Specifies a single test case to run.\n"
       "\t-e [EXECUTION_PROVIDER]: EXECUTION_PROVIDER could be 'cpu', 'cuda', 'dnnl', 'tensorrt', "
-      "'openvino', 'nuphar', 'migraphx', 'acl', 'armnn', 'nnapi' or 'coreml'. "
+      "'openvino', 'nuphar', 'rocm', 'migraphx', 'acl', 'armnn', 'nnapi' or 'coreml'. "
       "Default: 'cpu'.\n"
       "\t-p: Pause after launch, can attach debugger and continue\n"
       "\t-x: Use parallel executor, default (without -x): sequential executor.\n"
@@ -102,6 +102,7 @@ int real_main(int argc, char* argv[], Ort::Env& env) {
   bool enable_dml = false;
   bool enable_acl = false;
   bool enable_armnn = false;
+  bool enable_rocm = false;
   bool enable_migraphx = false;
   int device_id = 0;
   GraphOptimizationLevel graph_optimization_level = ORT_ENABLE_ALL;
@@ -174,6 +175,8 @@ int real_main(int argc, char* argv[], Ort::Env& env) {
             enable_acl = true;
           } else if (!CompareCString(optarg, ORT_TSTR("armnn"))) {
             enable_armnn = true;
+          } else if (!CompareCString(optarg, ORT_TSTR("rocm"))) {
+            enable_rocm = true;
           } else if (!CompareCString(optarg, ORT_TSTR("migraphx"))) {
             enable_migraphx = true;
           } else {
@@ -306,21 +309,17 @@ int real_main(int argc, char* argv[], Ort::Env& env) {
 
     if (enable_tensorrt) {
 #ifdef USE_TENSORRT
-      OrtTensorRTProviderOptions tensorrt_options{
-          0,
-          0,
-          nullptr};
-
       OrtCUDAProviderOptions cuda_options{
-          0,
+          device_id,
           OrtCudnnConvAlgoSearch::EXHAUSTIVE,
           std::numeric_limits<size_t>::max(),
           0,
           true,
           0,
-          nullptr};
+          nullptr,
+          nullptr};  // TODO: Support arena configuration for users of test runner
 
-      sf.AppendExecutionProvider_TensorRT(tensorrt_options);
+      Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_Tensorrt(sf, device_id));
       sf.AppendExecutionProvider_CUDA(cuda_options);
 #else
       fprintf(stderr, "TensorRT is not supported in this build");
@@ -346,7 +345,8 @@ int real_main(int argc, char* argv[], Ort::Env& env) {
           0,
           true,
           0,
-          nullptr};
+          nullptr,
+          nullptr};  // TODO: Support arena configuration for users of test runner
       sf.AppendExecutionProvider_CUDA(cuda_options);
 #else
       fprintf(stderr, "CUDA is not supported in this build");
@@ -414,6 +414,19 @@ int real_main(int argc, char* argv[], Ort::Env& env) {
       return -1;
 #endif
     }
+    if (enable_rocm) {
+#ifdef USE_ROCM
+      OrtROCMProviderOptions rocm_options{
+          0,
+          0,
+          std::numeric_limits<size_t>::max(),
+          0};
+      sf.AppendExecutionProvider_ROCM(rocm_options);
+#else
+      fprintf(stderr, "ROCM is not supported in this build");
+      return -1;
+#endif
+    }
     if (enable_migraphx) {
 #ifdef USE_MIGRAPHX
       Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_MIGraphX(sf, device_id));
@@ -465,6 +478,9 @@ int real_main(int argc, char* argv[], Ort::Env& env) {
             ORT_TSTR("operator_non_float_params"),
             ORT_TSTR("operator_params"),
             ORT_TSTR("operator_pow"),
+            ORT_TSTR("bernoulli"),
+            ORT_TSTR("bernoulli_double"),
+            ORT_TSTR("bernoulli_seed")
         };
 
     static const ORTCHAR_T* cuda_flaky_tests[] = {
@@ -527,6 +543,7 @@ int real_main(int argc, char* argv[], Ort::Env& env) {
       {"BERT_Squad", "test data bug"},
       {"constantofshape_float_ones", "test data bug", {"onnx141", "onnx150"}},
       {"constantofshape_int_zeros", "test data bug", {"onnx141", "onnx150"}},
+      {"convtranspose_autopad_same", "ONNX commit changes"},
       {"cast_STRING_to_FLOAT", "Linux CI has old ONNX python package with bad test data", {"onnx141"}},
       // Numpy float to string has unexpected rounding for some results given numpy default precision is meant to be 8.
       // "e.g. 0.296140194 -> '0.2961402' not '0.29614019'. ORT produces the latter with precision set to 8,

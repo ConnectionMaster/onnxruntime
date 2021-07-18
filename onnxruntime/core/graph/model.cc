@@ -271,6 +271,15 @@ ModelProto Model::ToProto() {
   return result;
 }
 
+ModelProto Model::ToGraphProtoWithExternalInitializers(const std::string& external_file_name,
+                                                       size_t initializer_size_threshold) {
+  ModelProto result(model_proto_);
+  const auto& graph = *graph_;
+  *(result.mutable_graph()) = graph.ToGraphProtoWithExternalInitializers(external_file_name,
+                                                                         initializer_size_threshold);
+  return result;
+}
+
 Status Model::Load(std::istream& model_istream, ModelProto* p_model_proto) {
   if (!model_istream.good()) {
     return Status(ONNXRUNTIME, INVALID_ARGUMENT, "Invalid istream object.");
@@ -445,6 +454,32 @@ Status Model::Save(Model& model, const std::wstring& file_path) {
 }
 #endif
 
+template <typename T>
+static Status SaveModelWithExternalInitializers(Model& model,
+                                                const T& file_path,
+                                                const std::string& external_file_name,
+                                                size_t initializer_size_threshold) {
+  int fd = 0;
+  Status status = Env::Default().FileOpenWr(file_path, fd);
+  ORT_RETURN_IF_ERROR(status);
+
+  ORT_TRY {
+    status = Model::SaveWithExternalInitializers(model, fd, external_file_name,
+                                                 initializer_size_threshold);
+  }
+  ORT_CATCH(const std::exception& ex) {
+    ORT_HANDLE_EXCEPTION([&]() {
+      status = Status(ONNXRUNTIME, FAIL, ex.what());
+    });
+  }
+  if (!status.IsOK()) {
+    GSL_SUPPRESS(es .84)
+    ORT_IGNORE_RETURN_VALUE(Env::Default().FileClose(fd));
+    return status;
+  }
+  return Env::Default().FileClose(fd);
+}
+
 Status Model::Load(const PathString& file_path,
                    ONNX_NAMESPACE::ModelProto& model_proto) {
   return LoadModel(file_path, model_proto);
@@ -460,6 +495,12 @@ Status Model::Load(const PathString& file_path, std::shared_ptr<Model>& p_model,
 
 Status Model::Save(Model& model, const std::string& file_path) {
   return SaveModel(model, file_path);
+}
+
+Status Model::SaveWithExternalInitializers(Model& model, const PathString& file_path,
+                                           const std::string& external_file_name,
+                                           size_t initializer_size_threshold) {
+  return SaveModelWithExternalInitializers(model, file_path, external_file_name, initializer_size_threshold);
 }
 
 Status Model::LoadFromBytes(int count, void* p_bytes, /*out*/ ONNX_NAMESPACE::ModelProto& model_proto) {
@@ -569,6 +610,25 @@ Status Model::Save(Model& model, int p_fd) {
   return Status(ONNXRUNTIME, INVALID_PROTOBUF, "Protobuf serialization failed.");
 }
 
+Status Model::SaveWithExternalInitializers(Model& model,
+                                           int fd,
+                                           const std::string& external_file_name,
+                                           size_t initializer_size_threshold) {
+  if (fd < 0) {
+    return Status(ONNXRUNTIME, INVALID_ARGUMENT, "<fd> is less than 0.");
+  }
+
+  ORT_RETURN_IF_ERROR(model.MainGraph().Resolve());
+
+  auto model_proto = model.ToGraphProtoWithExternalInitializers(external_file_name, initializer_size_threshold);
+  google::protobuf::io::FileOutputStream output(fd);
+  const bool result = model_proto.SerializeToZeroCopyStream(&output) && output.Flush();
+  if (result) {
+    return Status::OK();
+  }
+  return Status(ONNXRUNTIME, INVALID_PROTOBUF, "Protobuf serialization failed.");
+}
+
 common::Status Model::SaveToOrtFormat(flatbuffers::FlatBufferBuilder& builder,
                                       flatbuffers::Offset<fbs::Model>& fbs_model) const {
   auto producer_name = experimental::utils::SaveStringToOrtFormat(
@@ -592,18 +652,34 @@ common::Status Model::SaveToOrtFormat(flatbuffers::FlatBufferBuilder& builder,
   }
   auto op_set_ids = builder.CreateVector(op_set_ids_vec);
 
+  flatbuffers::Offset<flatbuffers::Vector<
+      flatbuffers::Offset<onnxruntime::experimental::fbs::StringStringEntry>>>
+      metadata_props{0};
+
+  // We will not serialize an empty metadata_props
+  if (!model_metadata_.empty()) {
+    std::vector<flatbuffers::Offset<onnxruntime::experimental::fbs::StringStringEntry>> metadata_props_vec;
+    metadata_props_vec.reserve(model_metadata_.size());
+    for (const auto& prop : model_metadata_) {
+      metadata_props_vec.push_back(
+          fbs::CreateStringStringEntryDirect(builder, prop.first.c_str(), prop.second.c_str()));
+    }
+    metadata_props = builder.CreateVector(metadata_props_vec);
+  }
+
   flatbuffers::Offset<fbs::Graph> fbs_graph;
   ORT_RETURN_IF_ERROR(graph_->SaveToOrtFormat(builder, fbs_graph));
 
   fbs::ModelBuilder mb(builder);
-  mb.add_ir_version(model_proto_.ir_version());
+  mb.add_ir_version(IrVersion());
   mb.add_opset_import(op_set_ids);
   mb.add_producer_name(producer_name);
   mb.add_producer_version(producer_version);
   mb.add_domain(domain);
-  mb.add_model_version(model_proto_.model_version());
+  mb.add_model_version(ModelVersion());
   mb.add_doc_string(doc_string);
   mb.add_graph_doc_string(graph_doc_string);
+  mb.add_metadata_props(metadata_props);
   mb.add_graph(fbs_graph);
 
   // add graph
@@ -626,6 +702,18 @@ common::Status Model::LoadFromOrtFormat(const fbs::Model& fbs_model,
                                         std::unique_ptr<Model>& model) {
   model.reset(new Model());
 
+  // Load the model metadata
+  if (const auto* fbs_metadata_props = fbs_model.metadata_props()) {
+    model->model_metadata_.reserve(fbs_metadata_props->size());
+    for (const auto* prop : *fbs_metadata_props) {
+      ORT_RETURN_IF(nullptr == prop, "Null entry in metadata_props. Invalid ORT format model.");
+      std::string key, value;
+      experimental::utils::LoadStringFromOrtFormat(key, prop->key());
+      experimental::utils::LoadStringFromOrtFormat(value, prop->value());
+      model->model_metadata_.insert({key, value});
+    }
+  }
+
 #if !defined(ORT_MINIMAL_BUILD)
   LOAD_STR_FROM_ORT_FORMAT(model->model_proto_, producer_name, fbs_model.producer_name());
   LOAD_STR_FROM_ORT_FORMAT(model->model_proto_, producer_version, fbs_model.producer_version());
@@ -642,6 +730,13 @@ common::Status Model::LoadFromOrtFormat(const fbs::Model& fbs_model,
     for (const auto& schema_collection : *local_registries) {
       schema_registry->RegisterRegistry(schema_collection);
     }
+  }
+
+  // Populate the metadata to model_proto
+  for (auto& metadata : model->model_metadata_) {
+    const gsl::not_null<StringStringEntryProto*> prop{model->model_proto_.add_metadata_props()};
+    prop->set_key(metadata.first);
+    prop->set_value(metadata.second);
   }
 #else
   experimental::utils::LoadStringFromOrtFormat(model->producer_name_, fbs_model.producer_name());

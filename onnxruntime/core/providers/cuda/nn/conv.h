@@ -3,7 +3,6 @@
 
 #pragma once
 
-#include "core/common/common.h"
 #include "core/platform/ort_mutex.h"
 #include "core/providers/cuda/cuda_kernel.h"
 #include "core/providers/cuda/cudnn_common.h"
@@ -22,6 +21,7 @@ class CudnnConvolutionDescriptor final {
              const std::vector<int64_t>& pads,
              const std::vector<int64_t>& strides,
              const std::vector<int64_t>& dilations,
+             int groups,
              cudnnConvolutionMode_t mode,
              cudnnDataType_t data_type);
 
@@ -181,8 +181,7 @@ class Conv : public CudaKernel {
   inline IAllocatorUniquePtr<void> GetWorkSpace() const {
     return GetScratchBuffer<void>(s_.workspace_bytes);
   }
-  const CudaT alpha_ = Consts<CudaT>::One;
-  const CudaT beta_ = Consts<CudaT>::Zero;
+
   Status UpdateState(OpKernelContext* context, bool bias_expected = false) const;
   ConvAttributes conv_attrs_;
   mutable CudnnConvState<cudnnConvolutionFwdAlgoPerf_t> s_;

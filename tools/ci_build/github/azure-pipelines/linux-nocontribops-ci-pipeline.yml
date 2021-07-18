@@ -11,10 +11,10 @@ jobs:
 
   - template: templates/get-docker-image-steps.yml
     parameters:
-      Dockerfile: tools/ci_build/github/linux/docker/Dockerfile.centos
+      Dockerfile: tools/ci_build/github/linux/docker/Dockerfile.manylinux2014_cpu
       Context: tools/ci_build/github/linux/docker
       DockerBuildArgs: "--build-arg BUILD_UID=$( id -u )"
-      Repository: onnxruntimecentoscpubuild
+      Repository: onnxruntimecpubuild
 
   - task: CmdLine@2
     inputs:
@@ -29,8 +29,8 @@ jobs:
           -e ALLOW_RELEASED_ONNX_OPSET_ONLY=0 \
           -e NIGHTLY_BUILD \
           -e BUILD_BUILDNUMBER \
-          onnxruntimecentoscpubuild \
-            python3 /onnxruntime_src/tools/ci_build/build.py \
+          onnxruntimecpubuild \
+            /opt/python/cp37-cp37m/bin/python3 /onnxruntime_src/tools/ci_build/build.py \
               --build_dir /build --cmake_generator Ninja \
               --config Debug Release \
               --skip_submodule_sync \

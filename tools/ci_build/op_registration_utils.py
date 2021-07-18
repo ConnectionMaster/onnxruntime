@@ -26,6 +26,7 @@ def map_ort_constant_to_domain(ort_constant_name: str):
     constant_to_domain_map = {'kOnnxDomain': 'ai.onnx',
                               'kMLDomain': 'ai.onnx.ml',
                               'kMSDomain': 'com.microsoft',
+                              'kMSExperimentalDomain': 'com.microsoft.experimental',
                               'kMSNchwcDomain': 'com.microsoft.nchwc',
                               'kMSFeaturizersDomain': 'com.microsoft.mlfeaturizers',
                               'kMSDmlDomain': 'com.microsoft.dml',
@@ -183,6 +184,11 @@ def _process_lines(lines: typing.List[str], offset: int, registration_processor:
             [arg.strip() for arg in code_line[trim_at: -len(end_mark)].split(',')]
         registration_processor.process_registration(lines_to_process, domain, op_type,
                                                     int(start_version), int(end_version), type)
+
+    else:
+        log.warning("Ignoring unhandled kernel registration variant: {}".format(code_line))
+        for line in lines_to_process:
+            registration_processor.process_other_line(line)
 
     return offset + 1
 

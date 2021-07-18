@@ -39,7 +39,8 @@ MODEL_CLASSES = {
     "bert": (BertOnnxModel, "pytorch", True),
     "bert_tf": (BertOnnxModelTF, "tf2onnx", False),
     "bert_keras": (BertOnnxModelKeras, "keras2onnx", False),
-    "gpt2": (Gpt2OnnxModel, "pytorch", True)
+    "gpt2": (Gpt2OnnxModel, "pytorch", True),
+    "gpt2_tf": (Gpt2OnnxModel, 'tf2onnx', False)  # might add a class for GPT2OnnxModel for TF later.
 }
 
 
@@ -119,17 +120,23 @@ def _parse_arguments():
                         choices=list(MODEL_CLASSES.keys()),
                         help="Model type selected in the list: " + ", ".join(MODEL_CLASSES.keys()))
 
-    parser.add_argument('--num_heads',
-                        required=False,
-                        type=int,
-                        default=12,
-                        help="number of attention heads. 12 for bert-base model and 16 for bert-large")
+    parser.add_argument(
+        '--num_heads',
+        required=False,
+        type=int,
+        default=12,
+        help=
+        "number of attention heads. 12 for bert-base model and 16 for bert-large. For BERT, set it to 0 to detect automatically."
+    )
 
-    parser.add_argument('--hidden_size',
-                        required=False,
-                        type=int,
-                        default=768,
-                        help="bert model hidden size. 768 for bert-base model and 1024 for bert-large")
+    parser.add_argument(
+        '--hidden_size',
+        required=False,
+        type=int,
+        default=768,
+        help=
+        "bert model hidden size. 768 for bert-base model and 1024 for bert-large. For BERT, set it to 0 to detect automatically."
+    )
 
     parser.add_argument('--input_int32',
                         required=False,
@@ -207,6 +214,12 @@ def _parse_arguments():
     parser.add_argument('--only_onnxruntime', required=False, action='store_true', help="optimized by onnxruntime only")
     parser.set_defaults(only_onnxruntime=False)
 
+    parser.add_argument('--disable_onnxruntime',
+                        required=False,
+                        action='store_true',
+                        help="do not use onnxruntime to optimize")
+    parser.set_defaults(disable_onnxruntime=False)
+
     parser.add_argument('--opt_level',
                         required=False,
                         type=int,
@@ -253,12 +266,13 @@ def _get_optimization_options(args):
 
 def optimize_model(input,
                    model_type='bert',
-                   num_heads=12,
-                   hidden_size=768,
+                   num_heads=0,
+                   hidden_size=0,
                    optimization_options=None,
                    opt_level=0,
                    use_gpu=False,
-                   only_onnxruntime=False):
+                   only_onnxruntime=False,
+                   disable_onnxruntime=False):
     """ Optimize Model by OnnxRuntime and/or offline fusion logic.
 
     The following optimizes model by OnnxRuntime only, and no offline fusion logic:
@@ -269,12 +283,13 @@ def optimize_model(input,
     Args:
         input (str): input model path.
         model_type (str): model type - like bert, bert_tf, bert_keras or gpt2.
-        num_heads (int): number of attention heads.
-        hidden_size (int): hidden size.
+        num_heads (int): number of attention heads. Default is 0 to allow detect the parameter from graph automatically (for model_type "bert" only).
+        hidden_size (int): hidden size. Default is 0 to allow detect the parameter from graph automatically (for model_type "bert" only).
         optimization_options (OptimizationOptions or None): optimization options that can use to turn on/off some fusions.
         opt_level (int): onnxruntime graph optimization level (0, 1, 2 or 99). When the level > 0, onnxruntime will be used to optimize model first.
         use_gpu (bool): use gpu or not for onnxruntime.
         only_onnxruntime (bool): only use onnxruntime to optimize model, and no offline fusion logic is used.
+        disable_onnxruntime (bool): only use offline fusion logic to optimize model.
 
      Returns:
         object of an optimizer class.
@@ -282,12 +297,17 @@ def optimize_model(input,
     (optimizer_class, producer, run_onnxruntime) = MODEL_CLASSES[model_type]
 
     temp_model_path = None
-    if opt_level > 1:  # Optimization specified for an execution provider.
-        temp_model_path = optimize_by_onnxruntime(input, use_gpu=use_gpu, opt_level=opt_level)
-    elif run_onnxruntime:
-        # Use Onnxruntime to do optimizations (like constant folding and cast elimation) that is not specified to exection provider.
-        # CPU provider is used here so that there is no extra node for GPU memory copy.
-        temp_model_path = optimize_by_onnxruntime(input, use_gpu=False, opt_level=1)
+
+    if disable_onnxruntime and only_onnxruntime:
+        logger.warning("Only one of the options can be true in disable_onnxruntime or only_onnxruntime")
+
+    if disable_onnxruntime is False:
+        if opt_level > 1:  # Optimization specified for an execution provider.
+            temp_model_path = optimize_by_onnxruntime(input, use_gpu=use_gpu, opt_level=opt_level)
+        elif run_onnxruntime:
+            # Use Onnxruntime to do optimizations (like constant folding and cast elimation) that is not specified to exection provider.
+            # CPU provider is used here so that there is no extra node for GPU memory copy.
+            temp_model_path = optimize_by_onnxruntime(input, use_gpu=False, opt_level=1)
 
     model = load_model(temp_model_path or input, format=None, load_external_data=True)
 
@@ -340,7 +360,8 @@ def main():
                                opt_level=args.opt_level,
                                optimization_options=optimization_options,
                                use_gpu=args.use_gpu,
-                               only_onnxruntime=args.only_onnxruntime)
+                               only_onnxruntime=args.only_onnxruntime,
+                               disable_onnxruntime=args.disable_onnxruntime)
 
     if args.float16:
         optimizer.convert_model_float32_to_float16()

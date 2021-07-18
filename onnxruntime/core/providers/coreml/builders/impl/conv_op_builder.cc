@@ -24,14 +24,14 @@ class ConvOpBuilder : public BaseOpBuilder {
 
   // Operator support related
  private:
-  bool IsOpSupportedImpl(const InitializedTensorSet& /* initializers */, const Node& /* node */,
+  bool IsOpSupportedImpl(const Node& /* node */, const OpBuilderInputParams& /* input_params */,
                          const logging::Logger& /* logger */) const override;
 };
 
 // Add operator related
 
 void ConvOpBuilder::AddInitializersToSkip(ModelBuilder& model_builder, const Node& node) const {
-  const auto input_defs = node.InputDefs();
+  const auto& input_defs = node.InputDefs();
 
   // skip the weight and bias (if has it) for conv as we will directly set those as part of the NN layer
   model_builder.AddInitializerToSkip(input_defs[1]->Name());  // w
@@ -43,9 +43,9 @@ void ConvOpBuilder::AddInitializersToSkip(ModelBuilder& model_builder, const Nod
 
 Status ConvOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder, const Node& node,
                                             const logging::Logger& logger) const {
-  std::unique_ptr<COREML_SPEC::NeuralNetworkLayer> layer = CreateNNLayer(node);
+  std::unique_ptr<COREML_SPEC::NeuralNetworkLayer> layer = CreateNNLayer(model_builder, node);
 
-  const auto input_defs = node.InputDefs();
+  const auto& input_defs = node.InputDefs();
 
   const auto& weight_tensor = *model_builder.GetInitializerTensors().at(input_defs[1]->Name());
   const auto& weight_shape = weight_tensor.dims();
@@ -107,7 +107,7 @@ Status ConvOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder, const N
     CreateCoreMLWeight(*coreml_conv->mutable_bias(), bias_tensor);
   }
 
-  *layer->mutable_input()->Add() = node.InputDefs()[0]->Name();
+  *layer->mutable_input()->Add() = input_defs[0]->Name();
   *layer->mutable_output()->Add() = node.OutputDefs()[0]->Name();
 
   model_builder.AddLayer(std::move(layer));
@@ -116,12 +116,13 @@ Status ConvOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder, const N
 
 // Operator support related
 
-bool ConvOpBuilder::IsOpSupportedImpl(const InitializedTensorSet& initializers, const Node& node,
+bool ConvOpBuilder::IsOpSupportedImpl(const Node& node, const OpBuilderInputParams& input_params,
                                       const logging::Logger& logger) const {
   const auto& name = node.Name();
-  const auto input_defs = node.InputDefs();
+  const auto& input_defs = node.InputDefs();
 
   const auto& weight_name = input_defs[1]->Name();
+  const auto& initializers = input_params.graph_viewer.GetAllInitializedTensors();
   if (Contains(initializers, weight_name)) {
     const auto& tensor = *initializers.at(weight_name);
     if (tensor.dims().size() != 4) {
@@ -146,7 +147,7 @@ bool ConvOpBuilder::IsOpSupportedImpl(const InitializedTensorSet& initializers, 
 }
 
 void CreateConvOpBuilder(const std::string& op_type, OpBuilderRegistrations& op_registrations) {
-  op_registrations.builders.push_back(onnxruntime::make_unique<ConvOpBuilder>());
+  op_registrations.builders.push_back(std::make_unique<ConvOpBuilder>());
   op_registrations.op_builder_map.emplace(op_type, op_registrations.builders.back().get());
 }
 

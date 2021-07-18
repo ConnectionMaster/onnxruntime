@@ -93,15 +93,15 @@ class QuantFormat(Enum):
         except KeyError:
             raise ValueError()
 
-
-QUANT_TYPE_TO_NP_TYPE = {
-    QuantType.QInt8: numpy.dtype('int8'),
-    QuantType.QUInt8: numpy.dtype('uint8'),
+ONNX_TYPE_TO_NP_TYPE = {
+    onnx_proto.TensorProto.INT8: numpy.dtype('int8'),
+    onnx_proto.TensorProto.UINT8:  numpy.dtype('uint8')
 }
 
-
-def quantize_nparray(qtype, arr, scale, zero_point, low=None, high=None):
-    dtype = QUANT_TYPE_TO_NP_TYPE[qtype]
+def quantize_nparray(qType, arr, scale, zero_point, low=None, high=None):
+    assert qType in ONNX_TYPE_TO_NP_TYPE, \
+        "Unexpected data type {} requested. Only INT8 and UINT8 are supported.".format(qType)
+    dtype = ONNX_TYPE_TO_NP_TYPE[qType]
     cliplow = max(0 if dtype == numpy.uint8 else -127, -127 if low is None else low)
     cliphigh = min(255 if dtype == numpy.uint8 else 127, 255 if high is None else high)
     arr_fp32 = numpy.asarray((arr.astype(numpy.float32) / scale).round() + zero_point)
@@ -109,25 +109,48 @@ def quantize_nparray(qtype, arr, scale, zero_point, low=None, high=None):
     return arr_fp32.astype(dtype)
 
 
-def compute_scale_zp(rmin, rmax, qType, quantize_range):
-    if qType == onnx_proto.TensorProto.INT8:
-        max_range = max(abs(rmin), abs(rmax))
-        scale = (float(max_range) * 2) / quantize_range if max_range > 0 else 1
-        zero_point = 0
-    elif qType == onnx_proto.TensorProto.UINT8:
-        scale = (float(rmax) - rmin) / quantize_range if rmin != rmax else 1
-        zero_point = round((0 - rmin) / scale)  # round to nearest integer
-    else:
-        raise ValueError("Unexpected data type {} requested. Only INT8 and UINT8 are supported.".format(qType))
+def compute_scale_zp(rmin, rmax, qmin, qmax, symmetric=False):
+    '''
+    Calculate the scale s and zero point z for the quantization relation 
+    r = s(q-z), where r are the original values and q are the corresponding
+    quantized values. 
+
+    r and z are calculated such that every value within [rmin,rmax] has an
+    approximate representation within [qmin,qmax]. In addition, qmin <= z <=
+    qmax is enforced. If the symmetric flag is set to True, the interval
+    [rmin,rmax] is symmetrized to [-absmax, +absmax], where
+    absmax = max(abs(rmin), abs(rmax)).
+
+    :parameter rmin: minimum value of r
+    :parameter rmax: maximum value of r
+    :parameter qmin: minimum value representable by the target quantization data type
+    :parameter qmax: maximum value representable by the target quantization data type
+    :return: zero and scale [z, s]
+
+    '''
+    
+    # Adjust rmin and rmax such that 0 is included in the range. This is
+    # required to make sure zero can be represented by the quantization data
+    # type (i.e. to make sure qmin <= zero_point <= qmax)
+    rmin = min(rmin, 0)
+    rmax = max(rmax, 0)
+
+    if symmetric:
+        absmax = max(abs(rmin), abs(rmax))
+        rmin = -absmax
+        rmax = +absmax
+
+    scale = (rmax - rmin) / float(qmax-qmin) if rmax!=rmin else 1.0
+    zero_point = round(qmin - rmin/scale)
 
     return [zero_point, scale]
 
 
-def quantize_data(data, quantize_range, qType):
+def quantize_data(data, qType, symmetric, reduce_range=False):
     '''
         :parameter data: data to quantize
-        :parameter quantize_range: list of data to weight pack.
         :parameter qType: data type to quantize to. Supported types UINT8 and INT8
+        :parameter symmetric: whether symmetric quantization is used or not. This is applied to INT8.
         :return: minimum, maximum, zero point, scale, and quantized weights
         To pack weights, we compute a linear transformation
             - when data type == uint8 mode, from [rmin, rmax] -> [0, 2^{b-1}] and
@@ -140,19 +163,28 @@ def quantize_data(data, quantize_range, qType):
             S: scale
             z: zero point
     '''
-    rmin = min(min(data), 0)
-    rmax = max(max(data), 0)
+    rmin = min(data)
+    rmax = max(data)
+    qmin, qmax = get_qmin_qmax_for_qType(qType, reduce_range)
 
-    zero_point, scale = compute_scale_zp(rmin, rmax, qType, quantize_range)
-    if qType == onnx_proto.TensorProto.INT8:
-        quantized_data = quantize_nparray(QuantType.QInt8, numpy.asarray(data), scale, zero_point)
-    elif qType == onnx_proto.TensorProto.UINT8:
-        quantized_data = quantize_nparray(QuantType.QUInt8, numpy.asarray(data), scale, zero_point)
-    else:
-        raise ValueError("Unexpected data type {} requested. Only INT8 and UINT8 are supported.".format(qType))
+    zero_point, scale = compute_scale_zp(rmin, rmax, qmin, qmax, symmetric)
+    quantized_data = quantize_nparray(qType, numpy.asarray(data), scale, zero_point)
 
     return rmin, rmax, zero_point, scale, quantized_data
 
+def get_qmin_qmax_for_qType(qType, reduce_range=False):
+    '''
+    Return qmin and qmax, the minimum and maximum value representable by the given qType
+    :parameter qType: onnx.onnx_pb.TensorProto.UINT8 or onnx.onnx_pb.TensorProto.UINT8
+    :return: qmin, qmax
+    '''
+    if qType == onnx_proto.TensorProto.UINT8:
+        (qmin, qmax) = (0,127) if reduce_range else (0,255)
+    elif qType == onnx_proto.TensorProto.INT8:
+        (qmin, qmax) = (-64,64) if reduce_range else (-127,127)
+    else:
+        raise ValueError("Unexpected data type {} requested. Only INT8 and UINT8 are supported.".format(qType))
+    return qmin, qmax
 
 def get_qrange_for_qType(qType, reduce_range=False):
     '''
@@ -160,13 +192,8 @@ def get_qrange_for_qType(qType, reduce_range=False):
         parameter qType: quantization type.
         return: quantization range.
     '''
-    if qType == onnx_proto.TensorProto.UINT8:
-        return 127 if reduce_range else 255
-    elif qType == onnx_proto.TensorProto.INT8:
-        return 128 if reduce_range else 254  # [-64, 64] for reduce_range, and [-127, 127] full_range.
-    else:
-        raise ValueError('unsupported quantization data type')
-
+    qmin, qmax = get_qmin_qmax_for_qType(qType, reduce_range)
+    return  qmax - qmin
 
 class QuantizedInitializer:
     '''
@@ -181,8 +208,7 @@ class QuantizedInitializer:
                  scales,
                  data=[],
                  quantized_data=[],
-                 axis=None,
-                 qType=QuantType.QUInt8):
+                 axis=None):
         self.name = name
         self.initializer = initializer  # TensorProto initializer in ONNX graph
         self.rmins = rmins  # List of minimum range for each axis
@@ -195,7 +221,6 @@ class QuantizedInitializer:
         # Scalar to specify which dimension in the initializer to weight pack.
         self.axis = axis
         # If empty, single zero point and scales computed from a single rmin and rmax
-        self.qType = qType  # type of quantized data.
 
 
 class QuantizedValue:
@@ -208,15 +233,13 @@ class QuantizedValue:
                  scale_name,
                  zero_point_name,
                  quantized_value_type,
-                 axis=None,
-                 qType=QuantType.QUInt8):
+                 axis=None):
         self.original_name = name
         self.q_name = new_quantized_name
         self.scale_name = scale_name
         self.zp_name = zero_point_name
         self.value_type = quantized_value_type
         self.axis = axis
-        self.qType = qType
 
 
 class BiasToQuantize:
@@ -305,11 +328,11 @@ def generate_identified_filename(filename: Path, identifier: str) -> Path:
     '''
     return filename.parent.joinpath(filename.stem + identifier).with_suffix(filename.suffix)
 
-
 def write_calibration_table(calibration_cache):
     '''
     Helper function to write calibration table to files.   
     '''
+
     import json
     import flatbuffers
     import onnxruntime.quantization.CalTableFlatBuffers.TrtTable as TrtTable

@@ -1,4 +1,4 @@
-<h1><span style="color:red">Note: ONNX Runtime Server is still in beta state and may not be ready for production environments.</span></h1>
+<h1><span style="color:red">Note: ONNX Runtime Server has been deprecated.</span></h1>
 
 # How to Use build ONNX Runtime Server for Prediction
 ONNX Runtime Server provides an easy way to start an inferencing server for prediction with both HTTP and GRPC endpoints.
@@ -53,7 +53,7 @@ http://<your_ip_address>:<port>/v1/models/<your-model-name>/versions/<your-versi
 
 ### Request and Response Payload
 
-The request and response need to be a protobuf message. The Protobuf definition can be found [here](../onnxruntime/server/protobuf/predict.proto).
+The request and response need to be a protobuf message. The Protobuf definition can be found [here](../server/protobuf/predict.proto).
 
 A protobuf message could have two formats: binary and JSON. Usually the binary payload has better latency, in the meanwhile the JSON format is easy for human readability. 
 
